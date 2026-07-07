@@ -99,6 +99,7 @@ func Build(snap *collect.Snapshot, opts Options) *Graph {
 		}
 	}
 	b.buildNodes(inodes)
+	b.buildConnectEdges(inodes)
 	g := b.finish(opts)
 	g.Warnings = append(append([]string{}, snap.Warnings...), b.warnings...)
 	return g
@@ -272,4 +273,85 @@ func (b *builder) finish(opts Options) *Graph {
 		return idx[a.To] < idx[c.To]
 	})
 	return g
+}
+
+func (b *builder) buildConnectEdges(inodes map[uint64]collect.Socket) {
+	for _, p := range b.snap.Processes {
+		from := nodeID(p)
+		node := b.nodes[from]
+		listenPorts := map[uint16]bool{}
+		for _, l := range node.Listens {
+			if l.Proto == "tcp" {
+				listenPorts[l.Port] = true
+			}
+		}
+		for _, ino := range p.SocketInodes {
+			s, ok := inodes[ino]
+			if !ok || s.State != collect.StateEstablished || s.Proto != "tcp" {
+				continue
+			}
+			if listenPorts[s.LocalPort] {
+				continue // inbound: server side of someone else's connection
+			}
+			remoteIP := s.RemoteIP.Unmap()
+			to := b.lookupListener(remoteIP, s.RemotePort)
+			if to == "" {
+				if b.isLocalAddr(remoteIP) {
+					continue // local endpoint without listener: mid-scan race
+				}
+				to = b.externalNode(fmt.Sprintf("%s:%d", remoteIP, s.RemotePort))
+			}
+			if to == from {
+				continue
+			}
+			b.addEdge(from, to, EdgeConnects, s.RemotePort)
+		}
+	}
+}
+
+func (b *builder) lookupListener(ip netip.Addr, port uint16) string {
+	if id, ok := b.listeners[portKey{addr: ip, port: port}]; ok {
+		return id
+	}
+	if ip.IsLoopback() || b.isLocalAddr(ip) {
+		if id, ok := b.listeners[portKey{port: port}]; ok {
+			return id
+		}
+	}
+	return ""
+}
+
+func (b *builder) isLocalAddr(ip netip.Addr) bool {
+	return ip.IsLoopback() || b.localIPs[ip]
+}
+
+func (b *builder) addEdge(from, to string, kind EdgeKind, port uint16) {
+	key := from + "|" + to
+	e := b.edges[key]
+	if e == nil {
+		e = &Edge{From: from, To: to, Kind: kind}
+		b.edges[key] = e
+	}
+	if kind == EdgeProxies {
+		e.Kind = EdgeProxies // config knowledge wins over runtime
+	}
+	if port != 0 {
+		for _, p := range e.Ports {
+			if p == port {
+				return
+			}
+		}
+		e.Ports = append(e.Ports, port)
+		sort.Slice(e.Ports, func(i, j int) bool { return e.Ports[i] < e.Ports[j] })
+	}
+}
+
+// externalNode returns the aggregated external node ID for a remote
+// "host:port", creating the node on first reference.
+func (b *builder) externalNode(name string) string {
+	id := "ext:" + name
+	if b.nodes[id] == nil {
+		b.nodes[id] = &Node{ID: id, Name: name, Kind: KindExternal}
+	}
+	return id
 }

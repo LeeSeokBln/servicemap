@@ -106,3 +106,60 @@ func TestNodeSortOrder(t *testing.T) {
 		t.Errorf("wrong order: %v %v %v", g.Nodes[0].Kind, g.Nodes[1].Kind, g.Nodes[2].Kind)
 	}
 }
+
+func edgeBetween(g *Graph, from, to string) *Edge {
+	for _, e := range g.Edges {
+		if e.From == from && e.To == to {
+			return e
+		}
+	}
+	return nil
+}
+
+func connectSnap() *collect.Snapshot {
+	return &collect.Snapshot{
+		Sockets: []collect.Socket{
+			// listeners
+			{Proto: "tcp", LocalIP: addr("0.0.0.0"), LocalPort: 3000, State: collect.StateListen, Inode: 201},
+			{Proto: "tcp", LocalIP: addr("0.0.0.0"), LocalPort: 3306, State: collect.StateListen, Inode: 301},
+			// myapp -> mariadb (client side)
+			{Proto: "tcp", LocalIP: addr("127.0.0.1"), LocalPort: 52000, RemoteIP: addr("127.0.0.1"), RemotePort: 3306, State: collect.StateEstablished, Inode: 202},
+			// mariadb's server side of the same connection (must be filtered)
+			{Proto: "tcp", LocalIP: addr("127.0.0.1"), LocalPort: 3306, RemoteIP: addr("127.0.0.1"), RemotePort: 52000, State: collect.StateEstablished, Inode: 302},
+			// myapp -> external db
+			{Proto: "tcp", LocalIP: addr("192.168.0.10"), LocalPort: 52001, RemoteIP: addr("10.0.0.5"), RemotePort: 5432, State: collect.StateEstablished, Inode: 203},
+		},
+		Processes: []collect.Process{
+			{PID: 200, Comm: "myapp", Unit: "myapp.service", SocketInodes: []uint64{201, 202, 203}},
+			{PID: 300, Comm: "mariadbd", Unit: "mariadb.service", SocketInodes: []uint64{301, 302}},
+		},
+	}
+}
+
+func TestConnectEdges(t *testing.T) {
+	g := Build(connectSnap(), Options{})
+
+	e := edgeBetween(g, "unit:myapp.service", "unit:mariadb.service")
+	if e == nil {
+		t.Fatal("myapp -> mariadb edge missing")
+	}
+	if e.Kind != EdgeConnects || len(e.Ports) != 1 || e.Ports[0] != 3306 {
+		t.Errorf("bad edge: %+v", e)
+	}
+
+	// inbound side must NOT create mariadb -> external(52000) edge
+	for _, e := range g.Edges {
+		if e.From == "unit:mariadb.service" {
+			t.Errorf("unexpected edge from mariadb: %+v", e)
+		}
+	}
+
+	ext := edgeBetween(g, "unit:myapp.service", "ext:10.0.0.5:5432")
+	if ext == nil {
+		t.Fatal("external edge missing")
+	}
+	extNode := nodeByName(g, "10.0.0.5:5432")
+	if extNode == nil || extNode.Kind != KindExternal {
+		t.Errorf("external node missing: %+v", extNode)
+	}
+}
