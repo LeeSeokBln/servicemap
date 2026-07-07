@@ -8,6 +8,7 @@ import (
 	"github.com/LeeSeokBln/servicemap/internal/graph"
 )
 
+// Tree formats g as the default terminal tree view.
 func Tree(g *graph.Graph) string {
 	byID := map[string]*graph.Node{}
 	for _, n := range g.Nodes {

@@ -86,6 +86,7 @@ type builder struct {
 	warnings  []string
 }
 
+// Build converts a collected snapshot into the service graph.
 func Build(snap *collect.Snapshot, opts Options) *Graph {
 	b := &builder{
 		snap:      snap,
@@ -362,6 +363,8 @@ func (b *builder) externalNode(name string) string {
 	return id
 }
 
+// buildProxyEdges adds nginx-config-derived edges. Caller must ensure
+// b.snap.Nginx is non-nil.
 func (b *builder) buildProxyEdges() {
 	from := ""
 	for _, p := range b.snap.Processes {

@@ -7,6 +7,8 @@ import (
 	"github.com/LeeSeokBln/servicemap/internal/graph"
 )
 
+// Markdown formats g as a markdown report: a service table followed by an
+// embedded mermaid diagram.
 func Markdown(g *graph.Graph) string {
 	byID := map[string]*graph.Node{}
 	for _, n := range g.Nodes {

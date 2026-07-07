@@ -7,6 +7,7 @@ import (
 	"github.com/LeeSeokBln/servicemap/internal/graph"
 )
 
+// Mermaid formats g as a mermaid flowchart (LR).
 func Mermaid(g *graph.Graph) string {
 	var b strings.Builder
 	b.WriteString("flowchart LR\n")

@@ -27,6 +27,7 @@ type jsonDoc struct {
 	Warnings []string   `json:"warnings,omitempty"`
 }
 
+// JSON formats g as an indented JSON document for scripting.
 func JSON(g *graph.Graph) (string, error) {
 	doc := jsonDoc{Nodes: []jsonNode{}, Edges: []jsonEdge{}, Warnings: g.Warnings}
 	for _, n := range g.Nodes {
