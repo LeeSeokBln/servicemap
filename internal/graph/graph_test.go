@@ -2,6 +2,7 @@ package graph
 
 import (
 	"net/netip"
+	"strings"
 	"testing"
 
 	"github.com/LeeSeokBln/servicemap/internal/collect"
@@ -161,5 +162,119 @@ func TestConnectEdges(t *testing.T) {
 	extNode := nodeByName(g, "10.0.0.5:5432")
 	if extNode == nil || extNode.Kind != KindExternal {
 		t.Errorf("external node missing: %+v", extNode)
+	}
+}
+
+func TestProxyEdges(t *testing.T) {
+	snap := connectSnap()
+	snap.Sockets = append(snap.Sockets,
+		collect.Socket{Proto: "tcp", LocalIP: addr("0.0.0.0"), LocalPort: 80, State: collect.StateListen, Inode: 101},
+	)
+	snap.Processes = append(snap.Processes,
+		collect.Process{PID: 100, Comm: "nginx", Unit: "nginx.service", SocketInodes: []uint64{101}},
+	)
+	snap.Nginx = &collect.NginxConfig{
+		Upstreams:   map[string][]string{"app": {"127.0.0.1:3000"}},
+		ProxyPass:   []string{"http://app", "http://10.9.9.9:8000", "http://unix:/tmp/x.sock"},
+		FastCGIPass: []string{"127.0.0.1:9000"},
+	}
+	g := Build(snap, Options{})
+
+	e := edgeBetween(g, "unit:nginx.service", "unit:myapp.service")
+	if e == nil || e.Kind != EdgeProxies || len(e.Ports) != 1 || e.Ports[0] != 3000 {
+		t.Fatalf("proxy edge via upstream wrong: %+v", e)
+	}
+	if edgeBetween(g, "unit:nginx.service", "ext:10.9.9.9:8000") == nil {
+		t.Error("remote proxy target must become external edge")
+	}
+	// fastcgi target 127.0.0.1:9000 has no listener -> external
+	if edgeBetween(g, "unit:nginx.service", "ext:127.0.0.1:9000") == nil {
+		t.Error("unmatched local proxy target must become external edge")
+	}
+	found := false
+	for _, w := range g.Warnings {
+		if strings.Contains(w, "unix") {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("unix target must produce warning, got %v", g.Warnings)
+	}
+}
+
+func TestProxyMergesOverConnects(t *testing.T) {
+	snap := connectSnap()
+	snap.Sockets = append(snap.Sockets,
+		collect.Socket{Proto: "tcp", LocalIP: addr("0.0.0.0"), LocalPort: 80, State: collect.StateListen, Inode: 101},
+		collect.Socket{Proto: "tcp", LocalIP: addr("127.0.0.1"), LocalPort: 53000, RemoteIP: addr("127.0.0.1"), RemotePort: 3000, State: collect.StateEstablished, Inode: 102},
+	)
+	snap.Processes = append(snap.Processes,
+		collect.Process{PID: 100, Comm: "nginx", Unit: "nginx.service", SocketInodes: []uint64{101, 102}},
+	)
+	snap.Nginx = &collect.NginxConfig{
+		Upstreams: map[string][]string{},
+		ProxyPass: []string{"http://127.0.0.1:3000"},
+	}
+	g := Build(snap, Options{})
+	var count int
+	var kind EdgeKind
+	for _, e := range g.Edges {
+		if e.From == "unit:nginx.service" && e.To == "unit:myapp.service" {
+			count++
+			kind = e.Kind
+		}
+	}
+	if count != 1 || kind != EdgeProxies {
+		t.Errorf("want single proxies edge, got count=%d kind=%s", count, kind)
+	}
+}
+
+func TestNoiseFilter(t *testing.T) {
+	snap := connectSnap()
+	// plain client process, no listens, connects to mariadb
+	snap.Sockets = append(snap.Sockets,
+		collect.Socket{Proto: "tcp", LocalIP: addr("127.0.0.1"), LocalPort: 54000, RemoteIP: addr("127.0.0.1"), RemotePort: 3306, State: collect.StateEstablished, Inode: 501},
+	)
+	snap.Processes = append(snap.Processes,
+		collect.Process{PID: 500, Comm: "mysqlclient", SocketInodes: []uint64{501}},
+	)
+
+	g := Build(snap, Options{})
+	if nodeByName(g, "mysqlclient (pid 500)") != nil {
+		t.Error("plain non-listening process must be filtered by default")
+	}
+	for _, e := range g.Edges {
+		if e.From == "proc:mysqlclient" {
+			t.Errorf("filtered node's edge leaked: %+v", e)
+		}
+	}
+
+	all := Build(snap, Options{All: true})
+	if nodeByName(all, "mysqlclient (pid 500)") == nil {
+		t.Error("--all must include plain processes")
+	}
+	if edgeBetween(all, "proc:mysqlclient", "unit:mariadb.service") == nil {
+		t.Error("--all must include their edges")
+	}
+}
+
+func TestSystemdConnectOnlyNodeKept(t *testing.T) {
+	// a systemd service with no listens but one outbound connection stays
+	snap := &collect.Snapshot{
+		Sockets: []collect.Socket{
+			{Proto: "tcp", LocalIP: addr("0.0.0.0"), LocalPort: 3306, State: collect.StateListen, Inode: 301},
+			{Proto: "tcp", LocalIP: addr("127.0.0.1"), LocalPort: 55000, RemoteIP: addr("127.0.0.1"), RemotePort: 3306, State: collect.StateEstablished, Inode: 601},
+		},
+		Processes: []collect.Process{
+			{PID: 300, Comm: "mariadbd", Unit: "mariadb.service", SocketInodes: []uint64{301}},
+			{PID: 600, Comm: "worker", Unit: "worker.service", SocketInodes: []uint64{601}},
+		},
+	}
+	g := Build(snap, Options{})
+	if nodeByName(g, "worker.service") == nil {
+		t.Error("connect-only systemd service must be kept")
+	}
+	if edgeBetween(g, "unit:worker.service", "unit:mariadb.service") == nil {
+		t.Error("its edge must be kept")
 	}
 }

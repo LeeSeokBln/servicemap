@@ -4,8 +4,11 @@ package graph
 
 import (
 	"fmt"
+	"net"
 	"net/netip"
 	"sort"
+	"strconv"
+	"strings"
 
 	"github.com/LeeSeokBln/servicemap/internal/collect"
 )
@@ -100,6 +103,9 @@ func Build(snap *collect.Snapshot, opts Options) *Graph {
 	}
 	b.buildNodes(inodes)
 	b.buildConnectEdges(inodes)
+	if snap.Nginx != nil {
+		b.buildProxyEdges()
+	}
 	g := b.finish(opts)
 	g.Warnings = append(append([]string{}, snap.Warnings...), b.warnings...)
 	return g
@@ -354,4 +360,91 @@ func (b *builder) externalNode(name string) string {
 		b.nodes[id] = &Node{ID: id, Name: name, Kind: KindExternal}
 	}
 	return id
+}
+
+func (b *builder) buildProxyEdges() {
+	from := ""
+	for _, p := range b.snap.Processes {
+		if p.Comm == "nginx" {
+			from = nodeID(p)
+			break
+		}
+	}
+	if from == "" || b.nodes[from] == nil {
+		return
+	}
+	cfg := b.snap.Nginx
+	for _, t := range cfg.ProxyPass {
+		b.addProxyTarget(from, t, cfg)
+	}
+	for _, t := range cfg.FastCGIPass {
+		b.addProxyTarget(from, t, cfg)
+	}
+}
+
+func (b *builder) addProxyTarget(from, raw string, cfg *collect.NginxConfig) {
+	defPort := uint16(80)
+	t := raw
+	switch {
+	case strings.HasPrefix(t, "https://"):
+		t = strings.TrimPrefix(t, "https://")
+		defPort = 443
+	case strings.HasPrefix(t, "http://"):
+		t = strings.TrimPrefix(t, "http://")
+	}
+	if strings.HasPrefix(t, "unix:") {
+		b.warnings = append(b.warnings, "skipping unix socket proxy target: "+raw)
+		return
+	}
+	if i := strings.IndexByte(t, '/'); i >= 0 {
+		t = t[:i]
+	}
+	if servers, ok := cfg.Upstreams[t]; ok {
+		for _, s := range servers {
+			if strings.HasPrefix(s, "unix:") {
+				b.warnings = append(b.warnings, "skipping unix socket upstream server: "+s)
+				continue
+			}
+			host, port := splitHostPort(s, 80)
+			b.linkProxy(from, host, port)
+		}
+		return
+	}
+	host, port := splitHostPort(t, defPort)
+	b.linkProxy(from, host, port)
+}
+
+func (b *builder) linkProxy(from, host string, port uint16) {
+	ip, ipErr := netip.ParseAddr(host)
+	if ipErr == nil {
+		ip = ip.Unmap()
+	}
+	local := host == "localhost" || (ipErr == nil && b.isLocalAddr(ip))
+	if local {
+		lookupIP := ip
+		if ipErr != nil {
+			lookupIP = netip.MustParseAddr("127.0.0.1")
+		}
+		if to := b.lookupListener(lookupIP, port); to != "" && to != from {
+			b.addEdge(from, to, EdgeProxies, port)
+			return
+		}
+	}
+	to := b.externalNode(fmt.Sprintf("%s:%d", host, port))
+	if to != from {
+		b.addEdge(from, to, EdgeProxies, port)
+	}
+}
+
+// splitHostPort splits "host:port", returning def when no port is present.
+func splitHostPort(s string, def uint16) (string, uint16) {
+	host, portStr, err := net.SplitHostPort(s)
+	if err != nil {
+		return s, def
+	}
+	p, err := strconv.ParseUint(portStr, 10, 16)
+	if err != nil {
+		return s, def
+	}
+	return host, uint16(p)
 }
