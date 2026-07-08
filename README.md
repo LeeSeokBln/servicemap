@@ -138,7 +138,13 @@ Complete graph in JSON for programmatic access:
 
 ## How it works
 
-servicemap has no daemon and requires no setup. It reads `/proc` socket tables (`/proc/net/tcp`, `/proc/net/udp`) to find listening ports, then matches them to running processes via `inodes`. For containers with separate network namespaces, it reads their `/proc/[pid]/net` socket tables too. Process-to-service mapping comes from systemd cgroups (`/proc/[pid]/cgroup`; unit names for systemd services, container IDs for Docker), and container names are resolved via the Docker socket. nginx proxy routes are extracted by parsing nginx config files (found via the nginx process's `-c` flag or defaulting to `/etc/nginx/nginx.conf`), matching `proxy_pass` directives to upstream `server` blocks and remote targets. UDP listens are shown but no UDP connection tracking is performed. By default, plain processes that neither listen nor are systemd/docker services are hidden (one-off clients, background tools); systemd/docker services are always shown. Use `--all` to display everything.
+No daemon, no setup, no external tools — a single pass over `/proc`:
+
+1. **Find sockets** — reads `/proc/net/tcp` and `/proc/net/udp` for listening ports and live TCP connections. Containers with their own network namespace get their `/proc/[pid]/net` tables read as well.
+2. **Match sockets to processes** — socket inodes in `/proc/[pid]/fd` tie every socket to the process that owns it.
+3. **Identify services** — `/proc/[pid]/cgroup` reveals the systemd unit or docker container ID; container names are resolved through the Docker socket.
+4. **Add proxy routes** — parses the nginx config (from the `-c` flag or `/etc/nginx/nginx.conf`), following `include`s and expanding `upstream` blocks, so idle `proxy_pass` routes appear even with no live traffic.
+5. **Draw the map** — merges runtime connections and config routes into one graph. Plain processes that neither listen nor belong to a service are hidden by default (`--all` shows them); UDP appears as listens only, without connection edges.
 
 ## Permissions
 
@@ -299,7 +305,13 @@ flowchart LR
 
 ### 작동 원리
 
-servicemap는 데몬이 없고 사전 설정이 필요 없습니다. `/proc` 소켓 테이블(`/proc/net/tcp`, `/proc/net/udp`)을 읽어서 리스닝 포트를 찾고, inode를 통해 실행 중인 프로세스와 매칭합니다. 컨테이너가 별도의 네트워크 네임스페이스를 사용하면 `/proc/[pid]/net` 소켓 테이블도 읽습니다. 프로세스-서비스 매핑은 systemd cgroup(`/proc/[pid]/cgroup`에서 systemd 서비스 이름이나 Docker 컨테이너 ID)으로 결정되며, 컨테이너 이름은 Docker 소켓을 통해 조회됩니다. nginx 프록시 경로는 nginx 설정 파일을 파싱해서 추출합니다 (nginx 프로세스의 `-c` 플래그로 찾거나 기본값 `/etc/nginx/nginx.conf`). `proxy_pass` 지시문을 upstream `server` 블록 및 원격 대상과 매칭합니다. UDP 리스닝은 표시되지만 UDP 연결 추적은 하지 않습니다. 기본적으로 리스닝도 하지 않고 systemd/docker 서비스도 아닌 순수 프로세스 노드(한 번 실행되는 클라이언트, 백그라운드 도구)는 숨겨집니다. systemd/docker 서비스는 나가는 연결만 있어도 항상 표시됩니다. `--all`을 사용하면 모든 노드를 표시합니다.
+데몬도, 사전 설정도, 외부 도구도 필요 없습니다. `/proc`를 한 번 훑는 것이 전부입니다:
+
+1. **소켓 수집** — `/proc/net/tcp`와 `/proc/net/udp`에서 리스닝 포트와 활성 TCP 연결을 읽습니다. 별도 네트워크 네임스페이스를 쓰는 컨테이너는 `/proc/[pid]/net` 테이블도 함께 읽습니다.
+2. **소켓 ↔ 프로세스 매칭** — `/proc/[pid]/fd`의 소켓 inode로 각 소켓의 소유 프로세스를 찾습니다.
+3. **서비스 식별** — `/proc/[pid]/cgroup`에서 systemd 유닛명 또는 docker 컨테이너 ID를 알아내고, 컨테이너 이름은 Docker 소켓으로 조회합니다.
+4. **프록시 경로 추가** — nginx 설정(`-c` 플래그 또는 기본값 `/etc/nginx/nginx.conf`)을 파싱해 `include`를 따라가고 `upstream` 블록을 펼칩니다. 트래픽이 없는 유휴 `proxy_pass` 경로도 지도에 나타나는 이유입니다.
+5. **지도 그리기** — 런타임 연결과 설정 기반 경로를 하나의 그래프로 합칩니다. 리스닝도 하지 않고 서비스에도 속하지 않는 일반 프로세스는 기본적으로 숨겨지며(`--all`로 표시), UDP는 연결 엣지 없이 리스닝만 표시됩니다.
 
 ### 권한
 
